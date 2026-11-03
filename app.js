@@ -30,3 +30,50 @@ const $=s=>document.querySelector(s);const $$=s=>[...document.querySelectorAll(s
  }
 }
 function locate(){if(!navigator.geolocation){alert('位置情報を利用できません');return}navigator.geolocation.getCurrentPosition(p=>{coords={lat:p.coords.latitude,lng:p.coords.longitude};search(lastQuery,lastCategory)},e=>alert('現在地を取得できませんでした：'+e.message),{enableHighAccuracy:true,timeout:12000})}$('#categories').innerHTML=cats.map(([emoji,name])=>`<button class="cat" data-cat="${name}"><span class="emoji">${emoji}</span>${name}</button>`).join('');document.addEventListener('click',e=>{let c=e.target.closest('[data-cat]');if(c)search('',c.dataset.cat);let a=e.target.closest('[data-area]');if(a)search(a.dataset.area);let f=e.target.closest('[data-fav]');if(f){let h=[...shops,...Object.values(favorites)].find(x=>x.id===f.dataset.fav);if(!h)return;if(favorites[h.id])delete favorites[h.id];else favorites[h.id]=h;localStorage.setItem('gourmet_favorites',JSON.stringify(favorites));if($('#favorites').classList.contains('hidden'))render(shops,'#list');else renderFavorites()}});$$('nav button').forEach(b=>b.onclick=()=>page(b.dataset.page));$('#homeSearch').onsubmit=e=>{e.preventDefault();search($('#homeQuery').value.trim())};$('#resultSearch').onsubmit=e=>{e.preventDefault();search($('#resultQuery').value.trim(),$('#genre').value)};$('#genre').onchange=()=>search($('#resultQuery').value.trim(),$('#genre').value);$('#sort').onchange=()=>search(lastQuery,lastCategory);$('#nearby').onclick=locate;$('#locate').onclick=locate;$('#backHome').onclick=()=>page('home');$('#allAreas').onclick=()=>search('');$('#info').onclick=()=>alert('グルメマップへようこそ！');$('#endpoint').value=endpoint();$('#endpoint').readOnly=true;$('#saveEndpoint').onclick=()=>alert('接続先はSupabaseに設定済みです。');showStatus('Supabase接続設定済み。キーワードまたは現在地で検索してください。');if('serviceWorker'in navigator&&location.protocol==='https:')navigator.serviceWorker.register('./sw.js').catch(()=>{});
+// 現在地周辺の飲食店マップ（ホットペッパーAPI / OpenStreetMap）
+let nearMap=null,nearPins=null,nearSelf=null,nearRequest=0;
+function mapNotice(message){const el=document.getElementById('mapMessage');if(el)el.textContent=message;}
+function initNearMap(){
+ if(nearMap)return true;
+ if(typeof L==='undefined'){mapNotice('地図ライブラリを読み込めませんでした。通信環境を確認してください。');return false;}
+ nearMap=L.map('nearMap',{scrollWheelZoom:false}).setView([35.222,138.622],12);
+ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(nearMap);
+ nearPins=L.layerGroup().addTo(nearMap);
+ return true;
+}
+async function refreshNearMap(){
+ if(!initNearMap())return;
+ const request=++nearRequest;
+ mapNotice('現在地を取得しています…');
+ if(!navigator.geolocation){mapNotice('この端末では位置情報を利用できません。');return;}
+ navigator.geolocation.getCurrentPosition(async position=>{
+  if(request!==nearRequest)return;
+  const lat=position.coords.latitude,lng=position.coords.longitude;
+  coords={lat,lng};
+  nearMap.setView([lat,lng],14);
+  if(nearSelf)nearMap.removeLayer(nearSelf);
+  nearSelf=L.circleMarker([lat,lng],{radius:9,color:'#fff',weight:3,fillColor:'#2687ee',fillOpacity:1}).addTo(nearMap).bindPopup('📍 現在地');
+  nearPins.clearLayers();
+  mapNotice('近くの飲食店を検索しています…');
+  try{
+   const response=await fetch(API_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json','apikey':PUBLIC_ANON_KEY,'Authorization':'Bearer '+PUBLIC_ANON_KEY},body:JSON.stringify({lat,lng,range:3,count:30,start:1})});
+   const data=await response.json();
+   if(!response.ok)throw new Error(data.error||'APIエラー '+response.status);
+   if(request!==nearRequest)return;
+   const found=(data.shops||[]).map(normalize).filter(s=>Number.isFinite(s.lat)&&Number.isFinite(s.lng)&&s.lat!==0&&s.lng!==0);
+   for(const shop of found){
+    const link=shop.booking?'<a href="'+esc(shop.booking)+'" target="_blank" rel="noopener noreferrer">店舗情報を見る ›</a>':'';
+    L.marker([shop.lat,shop.lng]).addTo(nearPins).bindPopup('<strong>'+esc(shop.name)+'</strong><div>'+esc(shop.genre)+'</div><div>'+esc(shop.address)+'</div>'+link);
+   }
+   document.getElementById('mapCount').textContent='📍 周辺の飲食店 '+found.length+'件';
+   mapNotice(found.length?'':'この範囲で表示できる店舗がありません。');
+  }catch(error){if(request===nearRequest)mapNotice('店舗の取得に失敗しました。API接続をご確認ください。');}
+ },error=>{
+  if(request!==nearRequest)return;
+  const reasons={1:'位置情報が許可されていません。Safariの位置情報設定をご確認ください。',2:'現在地を取得できませんでした。',3:'位置情報の取得がタイムアウトしました。'};
+  mapNotice(reasons[error.code]||'現在地を取得できませんでした。');
+ },{enableHighAccuracy:true,timeout:15000,maximumAge:60000});
+}
+document.getElementById('mapRefresh')?.addEventListener('click',refreshNearMap);
+document.getElementById('nearby')?.addEventListener('click',e=>{e.stopImmediatePropagation();e.preventDefault();refreshNearMap();},true);
+window.addEventListener('load',()=>{if(initNearMap())refreshNearMap();});
