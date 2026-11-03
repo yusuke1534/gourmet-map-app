@@ -30,6 +30,19 @@ const $=s=>document.querySelector(s);const $$=s=>[...document.querySelectorAll(s
  }
 }
 function locate(){if(!navigator.geolocation){alert('位置情報を利用できません');return}navigator.geolocation.getCurrentPosition(p=>{coords={lat:p.coords.latitude,lng:p.coords.longitude};search(lastQuery,lastCategory)},e=>alert('現在地を取得できませんでした：'+e.message),{enableHighAccuracy:true,timeout:12000})}$('#categories').innerHTML=cats.map(([emoji,name])=>`<button class="cat" data-cat="${name}"><span class="emoji">${emoji}</span>${name}</button>`).join('');document.addEventListener('click',e=>{let c=e.target.closest('[data-cat]');if(c)search('',c.dataset.cat);let a=e.target.closest('[data-area]');if(a)search(a.dataset.area);let f=e.target.closest('[data-fav]');if(f){let h=[...shops,...Object.values(favorites)].find(x=>x.id===f.dataset.fav);if(!h)return;if(favorites[h.id])delete favorites[h.id];else favorites[h.id]=h;localStorage.setItem('gourmet_favorites',JSON.stringify(favorites));if($('#favorites').classList.contains('hidden'))render(shops,'#list');else renderFavorites()}});$$('nav button').forEach(b=>b.onclick=()=>page(b.dataset.page));$('#homeSearch').onsubmit=e=>{e.preventDefault();search($('#homeQuery').value.trim())};$('#resultSearch').onsubmit=e=>{e.preventDefault();search($('#resultQuery').value.trim(),$('#genre').value)};$('#genre').onchange=()=>search($('#resultQuery').value.trim(),$('#genre').value);$('#sort').onchange=()=>search(lastQuery,lastCategory);$('#nearby').onclick=locate;$('#locate').onclick=locate;$('#backHome').onclick=()=>page('home');$('#allAreas').onclick=()=>search('');$('#info').onclick=()=>alert('グルメマップへようこそ！');$('#endpoint').value=endpoint();$('#endpoint').readOnly=true;$('#saveEndpoint').onclick=()=>alert('接続先はSupabaseに設定済みです。');showStatus('Supabase接続設定済み。キーワードまたは現在地で検索してください。');if('serviceWorker'in navigator&&location.protocol==='https:')navigator.serviceWorker.register('./sw.js').catch(()=>{});
+// 料理ジャンルごとの地図ピン。画像ファイルに依存しないためSafariでも表示可能。
+function restaurantPin(genre){
+ const g=String(genre||'');
+ let emoji='🍴',color='#4675df';
+ if(/ラーメン|つけ麺/.test(g)){emoji='🍜';color='#ef8b17'}
+ else if(/カフェ|喫茶|スイーツ/.test(g)){emoji='☕';color='#9c43a9'}
+ else if(/居酒屋|ダイニングバー|バー|パブ/.test(g)){emoji='🍺';color='#ed9b13'}
+ else if(/焼肉|ホルモン|ステーキ/.test(g)){emoji='🥩';color='#e94c71'}
+ else if(/中華|餃子|台湾料理/.test(g)){emoji='🥟';color='#36a45d'}
+ else if(/洋食|イタリアン|フレンチ|スペイン|パスタ|ピザ/.test(g)){emoji='🍝';color='#ed7932'}
+ else if(/和食|寿司|海鮮|日本料理|そば|うどん/.test(g)){emoji='🍱';color='#b77a38'}
+ return L.divIcon({className:'gm-pin-container',html:`<div class="gm-pin" style="--gm-pin-color:${color}"><span>${emoji}</span></div>`,iconSize:[42,54],iconAnchor:[21,52],popupAnchor:[0,-49]});
+}
 // 現在地周辺の飲食店マップ（ホットペッパーAPI / OpenStreetMap）
 let nearMap=null,nearPins=null,nearSelf=null,nearRequest=0;
 function mapNotice(message){const el=document.getElementById('mapMessage');if(el)el.textContent=message;}
@@ -62,8 +75,11 @@ async function refreshNearMap(){
    if(request!==nearRequest)return;
    const found=(data.shops||[]).map(normalize).filter(s=>Number.isFinite(s.lat)&&Number.isFinite(s.lng)&&s.lat!==0&&s.lng!==0);
    for(const shop of found){
-    const link=shop.booking?'<a href="'+esc(shop.booking)+'" target="_blank" rel="noopener noreferrer">店舗情報を見る ›</a>':'';
-    L.marker([shop.lat,shop.lng]).addTo(nearPins).bindPopup('<strong>'+esc(shop.name)+'</strong><div>'+esc(shop.genre)+'</div><div>'+esc(shop.address)+'</div>'+link);
+    const pin=restaurantPin(shop.genre);
+    const photo=shop.photo?`<img class="gm-popup-photo" src="${esc(shop.photo)}" alt="${esc(shop.name)}の店舗写真" loading="lazy" onerror="this.style.display='none'">`:'';
+    const link=shop.booking?`<a class="gm-popup-link" href="${esc(shop.booking)}" target="_blank" rel="noopener noreferrer">詳細を見る ›</a>`:`<span class="gm-popup-unavailable">店舗ページの登録がありません</span>`;
+    const popup=`<div class="gm-popup">${photo}<strong class="gm-popup-title">${esc(shop.name)}</strong><div class="gm-popup-genre">${esc(shop.genre||'飲食店')}</div><div class="gm-popup-address">📍 ${esc(shop.address||'住所情報なし')}</div>${link}</div>`;
+    L.marker([shop.lat,shop.lng],{icon:pin,title:shop.name}).addTo(nearPins).bindPopup(popup,{maxWidth:260,minWidth:205,autoPan:true});
    }
    document.getElementById('mapCount').textContent='📍 周辺の飲食店 '+found.length+'件';
    mapNotice(found.length?'':'この範囲で表示できる店舗がありません。');
