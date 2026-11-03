@@ -77,3 +77,16 @@ async function refreshNearMap(){
 document.getElementById('mapRefresh')?.addEventListener('click',refreshNearMap);
 document.getElementById('nearby')?.addEventListener('click',e=>{e.stopImmediatePropagation();e.preventDefault();refreshNearMap();},true);
 window.addEventListener('load',()=>{if(initNearMap())refreshNearMap();});
+
+(function(){
+ let resizeTimer;
+ const fixMapSize=()=>{
+  if(typeof nearMap!=='undefined'&&nearMap){
+   nearMap.invalidateSize({pan:false,animate:false});
+  }
+ };
+ window.addEventListener('pageshow',()=>setTimeout(fixMapSize,300));
+ window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(fixMapSize,150)});
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden)setTimeout(fixMapSize,250)});
+ window.addEventListener('load',()=>setTimeout(fixMapSize,600));
+})();
