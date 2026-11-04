@@ -46,6 +46,7 @@ function restaurantPin(genre){
 // 地図の表示範囲に追従する飲食店検索。APIのページング上限を尊重して分割取得。
 let nearMap=null,nearPins=null,nearSelf=null,nearRequest=0,nearTimer=null,nearAbort=null;
 let nearLocation=null,nearCache=new Map();
+let nearPopupOpen=false,nearPendingRefresh=false;
 function mapNotice(message){const el=document.getElementById('mapMessage');if(el){el.textContent=message;el.style.display=message?'block':'none';}}
 function initNearMap(){
  if(nearMap)return true;
@@ -54,9 +55,11 @@ function initNearMap(){
  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(nearMap);
  nearPins=L.layerGroup().addTo(nearMap);
  nearMap.on('moveend zoomend',()=>scheduleViewportSearch());
+ nearMap.on('popupopen',()=>{nearPopupOpen=true;});
+ nearMap.on('popupclose',()=>{nearPopupOpen=false;if(nearPendingRefresh){nearPendingRefresh=false;scheduleViewportSearch();}});
  return true;
 }
-function scheduleViewportSearch(){clearTimeout(nearTimer);nearTimer=setTimeout(loadViewportShops,420);}
+function scheduleViewportSearch(){clearTimeout(nearTimer);if(nearPopupOpen){nearPendingRefresh=true;return;}nearTimer=setTimeout(loadViewportShops,420);}
 function kmBetween(a,b,c,d){const dy=(c-a)*111.2,dx=(d-b)*111.2*Math.cos((a+c)*Math.PI/360);return Math.hypot(dx,dy);}
 function viewportCells(){
  const bounds=nearMap.getBounds(),south=Math.max(-85,bounds.getSouth()),north=Math.min(85,bounds.getNorth());
@@ -101,6 +104,7 @@ async function fetchCell(cell,signal){
 }
 async function loadViewportShops(){
  if(!nearMap)return;
+ if(nearPopupOpen){nearPendingRefresh=true;return;}
  const request=++nearRequest;
  if(nearAbort)nearAbort.abort();
  nearAbort=new AbortController();
@@ -112,8 +116,9 @@ async function loadViewportShops(){
  async function worker(){while(cursor<cells.length){const cell=cells[cursor++];try{const items=await fetchCell(cell,nearAbort.signal);for(const s of items){if(s.id&&Number.isFinite(s.lat)&&Number.isFinite(s.lng)&&bounds.contains([s.lat,s.lng]))found.set(s.id,s);}}catch(e){if(e.name==='AbortError')return;failed++;}}}
  await Promise.all(Array.from({length:Math.min(3,cells.length)},worker));
  if(request!==nearRequest)return;
+ if(nearPopupOpen){nearPendingRefresh=true;return;}
  nearPins.clearLayers();
- for(const shop of found.values())L.marker([shop.lat,shop.lng],{icon:restaurantPin(shop.genre),title:shop.name}).addTo(nearPins).bindPopup(popupFor(shop),{maxWidth:260,minWidth:205,autoPan:true});
+ for(const shop of found.values())L.marker([shop.lat,shop.lng],{icon:restaurantPin(shop.genre),title:shop.name}).addTo(nearPins).bindPopup(popupFor(shop),{maxWidth:260,minWidth:205,autoPan:false,closeOnClick:false,autoClose:true,keepInView:false});
  document.getElementById('mapCount').textContent='📍 表示範囲の飲食店 '+found.size+'件';
  if(failed)mapNotice(`一部の地域の取得に失敗しました（${failed}件）。地図を動かすか更新してください。`);
  else if(limited)mapNotice('広い範囲を表示中です。すべての店舗を探すには地図を拡大してください。');
