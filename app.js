@@ -6,13 +6,40 @@ const $=s=>document.querySelector(s);const $$=s=>[...document.querySelectorAll(s
  $('#list').innerHTML='<div class="empty">店舗を検索しています…</div>';
  try{
   const keyword=query.trim();
-  const body={keyword,count:30};
+  // ジャンル検索は現在地を中心とした半径10kmで固定。
+  if(category && !keyword && !coords){
+    try{const p=await new Promise((resolve,reject)=>navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:true,timeout:15000}));coords={lat:p.coords.latitude,lng:p.coords.longitude};}
+    catch(e){$('#list').innerHTML='<div class="notice">半径10kmのジャンル検索には現在地の許可が必要です。位置情報を許可して再度お試しください。</div>';return;}
+  }
+  const body={keyword,count:100};
   if(genreCodes[category]) body.genre=genreCodes[category];
   if(category==='その他') body.exclude_genres=Object.values(genreCodes);
-  if(coords&&!keyword){body.lat=coords.lat;body.lng=coords.lng;body.range=3;}
-  if(!keyword&&!coords&&!category){
-    $('#list').innerHTML='<div class="notice">検索語を入力するか、現在地から検索してください。</div>';return;
+  if(category && !keyword && coords){
+    const latStep=4/111.2,lonStep=4/(111.2*Math.max(.1,Math.cos(coords.lat*Math.PI/180)));
+    const cells=[];
+    for(let y=-2;y<=2;y++)for(let x=-2;x<=2;x++){
+      const lat=coords.lat+y*latStep,lng=coords.lng+x*lonStep;
+      if(kmBetween(coords.lat,coords.lng,lat,lng)<=11.4)cells.push({lat,lng});
+    }
+    const found=new Map();let errors=0, cursor=0;
+    async function worker(){while(cursor<cells.length){const cell=cells[cursor++];try{
+      for(let start=1;start<=401;start+=100){
+        const response=await fetch(API_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json','apikey':PUBLIC_ANON_KEY,'Authorization':'Bearer '+PUBLIC_ANON_KEY},body:JSON.stringify({...body,lat:cell.lat,lng:cell.lng,range:5,start})});
+        const data=await response.json();if(!response.ok)throw Error(data.error||'APIエラー');
+        const batch=(data.shops||[]).map(normalize);
+        for(const s of batch){if(s.id&&Number.isFinite(s.lat)&&Number.isFinite(s.lng)&&kmBetween(coords.lat,coords.lng,s.lat,s.lng)<=10)found.set(s.id,s);}
+        if(batch.length<100)break;
+      }
+    }catch(e){errors++;}}}
+    await Promise.all(Array.from({length:3},worker));
+    shops=[...found.values()];
+    if($('#sort').value==='4')shops.sort((a,b)=>kmBetween(coords.lat,coords.lng,a.lat,a.lng)-kmBetween(coords.lat,coords.lng,b.lat,b.lng));
+    render(shops,'#list');
+    if(errors)$('#list').insertAdjacentHTML('afterbegin',`<div class="notice">一部の検索エリアで取得に失敗しました（${errors}件）。表示件数は完全ではない場合があります。</div>`);
+    return;
   }
+  if(coords&&!keyword){body.lat=coords.lat;body.lng=coords.lng;body.range=3;}
+  if(!keyword&&!coords&&!category){$('#list').innerHTML='<div class="notice">検索語を入力するか、現在地から検索してください。</div>';return;}
   const response=await fetch(API_ENDPOINT,{
    method:'POST',
    headers:{'Content-Type':'application/json','apikey':PUBLIC_ANON_KEY,'Authorization':'Bearer '+PUBLIC_ANON_KEY},
@@ -119,7 +146,13 @@ async function loadViewportShops(){
  if(request!==nearRequest)return;
  if(nearPopupOpen){nearPendingRefresh=true;return;}
  nearPins.clearLayers();
- for(const shop of found.values())L.marker([shop.lat,shop.lng],{icon:restaurantPin(shop.genre),title:shop.name}).addTo(nearPins).bindPopup(popupFor(shop),{maxWidth:260,minWidth:205,autoPan:false,closeOnClick:false,autoClose:true,keepInView:false});
+ for(const shop of found.values())L.marker([shop.lat,shop.lng],{icon:restaurantPin(shop.genre),title:shop.name}).addTo(nearPins).on('click',()=>{
+  nearPopupOpen=true;
+  const panel=document.getElementById('gmSelectedShop');
+  panel.innerHTML='<button type="button" class="gm-card-close" aria-label="閉じる">×</button>'+popupFor(shop);
+  panel.hidden=false;
+  panel.querySelector('.gm-card-close').onclick=()=>{panel.hidden=true;nearPopupOpen=false;if(nearPendingRefresh){nearPendingRefresh=false;scheduleViewportSearch();}};
+});
  document.getElementById('mapCount').textContent='📍 表示範囲の飲食店 '+found.size+'件';
  if(failed)mapNotice(`一部の地域の取得に失敗しました（${failed}件）。地図を動かすか更新してください。`);
  else if(limited)mapNotice('広い範囲を表示中です。すべての店舗を探すには地図を拡大してください。');
