@@ -43,54 +43,96 @@ function restaurantPin(genre){
  else if(/和食|寿司|海鮮|日本料理|そば|うどん/.test(g)){emoji='🍱';color='#b77a38'}
  return L.divIcon({className:'gm-pin-container',html:`<div class="gm-pin" style="--gm-pin-color:${color}"><span>${emoji}</span></div>`,iconSize:[42,54],iconAnchor:[21,52],popupAnchor:[0,-49]});
 }
-// 現在地周辺の飲食店マップ（ホットペッパーAPI / OpenStreetMap）
-let nearMap=null,nearPins=null,nearSelf=null,nearRequest=0;
-function mapNotice(message){const el=document.getElementById('mapMessage');if(el)el.textContent=message;}
+// 地図の表示範囲に追従する飲食店検索。APIのページング上限を尊重して分割取得。
+let nearMap=null,nearPins=null,nearSelf=null,nearRequest=0,nearTimer=null,nearAbort=null;
+let nearLocation=null,nearCache=new Map();
+function mapNotice(message){const el=document.getElementById('mapMessage');if(el){el.textContent=message;el.style.display=message?'block':'none';}}
 function initNearMap(){
  if(nearMap)return true;
- if(typeof L==='undefined'){mapNotice('地図ライブラリを読み込めませんでした。通信環境を確認してください。');return false;}
- nearMap=L.map('nearMap',{scrollWheelZoom:false}).setView([35.222,138.622],12);
+ if(typeof L==='undefined'){mapNotice('地図を読み込めませんでした。通信環境をご確認ください。');return false;}
+ nearMap=L.map('nearMap',{scrollWheelZoom:false,zoomControl:true}).setView([35.222,138.622],12);
  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap contributors'}).addTo(nearMap);
  nearPins=L.layerGroup().addTo(nearMap);
+ nearMap.on('moveend zoomend',()=>scheduleViewportSearch());
  return true;
 }
-async function refreshNearMap(){
- if(!initNearMap())return;
- const request=++nearRequest;
- mapNotice('現在地を取得しています…');
- if(!navigator.geolocation){mapNotice('この端末では位置情報を利用できません。');return;}
- navigator.geolocation.getCurrentPosition(async position=>{
-  if(request!==nearRequest)return;
-  const lat=position.coords.latitude,lng=position.coords.longitude;
-  coords={lat,lng};
-  nearMap.setView([lat,lng],14);
-  if(nearSelf)nearMap.removeLayer(nearSelf);
-  nearSelf=L.circleMarker([lat,lng],{radius:9,color:'#fff',weight:3,fillColor:'#2687ee',fillOpacity:1}).addTo(nearMap).bindPopup('📍 現在地');
-  nearPins.clearLayers();
-  mapNotice('近くの飲食店を検索しています…');
-  try{
-   const response=await fetch(API_ENDPOINT,{method:'POST',headers:{'Content-Type':'application/json','apikey':PUBLIC_ANON_KEY,'Authorization':'Bearer '+PUBLIC_ANON_KEY},body:JSON.stringify({lat,lng,range:3,count:30,start:1})});
-   const data=await response.json();
-   if(!response.ok)throw new Error(data.error||'APIエラー '+response.status);
-   if(request!==nearRequest)return;
-   const found=(data.shops||[]).map(normalize).filter(s=>Number.isFinite(s.lat)&&Number.isFinite(s.lng)&&s.lat!==0&&s.lng!==0);
-   for(const shop of found){
-    const pin=restaurantPin(shop.genre);
-    const photo=shop.photo?`<img class="gm-popup-photo" src="${esc(shop.photo)}" alt="${esc(shop.name)}の店舗写真" loading="lazy" onerror="this.style.display='none'">`:'';
-    const link=shop.booking?`<a class="gm-popup-link" href="${esc(shop.booking)}" target="_blank" rel="noopener noreferrer">詳細を見る ›</a>`:`<span class="gm-popup-unavailable">店舗ページの登録がありません</span>`;
-    const popup=`<div class="gm-popup">${photo}<strong class="gm-popup-title">${esc(shop.name)}</strong><div class="gm-popup-genre">${esc(shop.genre||'飲食店')}</div><div class="gm-popup-address">📍 ${esc(shop.address||'住所情報なし')}</div>${link}</div>`;
-    L.marker([shop.lat,shop.lng],{icon:pin,title:shop.name}).addTo(nearPins).bindPopup(popup,{maxWidth:260,minWidth:205,autoPan:true});
-   }
-   document.getElementById('mapCount').textContent='📍 周辺の飲食店 '+found.length+'件';
-   mapNotice(found.length?'':'この範囲で表示できる店舗がありません。');
-  }catch(error){if(request===nearRequest)mapNotice('店舗の取得に失敗しました。API接続をご確認ください。');}
- },error=>{
-  if(request!==nearRequest)return;
-  const reasons={1:'位置情報が許可されていません。Safariの位置情報設定をご確認ください。',2:'現在地を取得できませんでした。',3:'位置情報の取得がタイムアウトしました。'};
-  mapNotice(reasons[error.code]||'現在地を取得できませんでした。');
- },{enableHighAccuracy:true,timeout:15000,maximumAge:60000});
+function scheduleViewportSearch(){clearTimeout(nearTimer);nearTimer=setTimeout(loadViewportShops,420);}
+function kmBetween(a,b,c,d){const dy=(c-a)*111.2,dx=(d-b)*111.2*Math.cos((a+c)*Math.PI/360);return Math.hypot(dx,dy);}
+function viewportCells(){
+ const bounds=nearMap.getBounds(),south=Math.max(-85,bounds.getSouth()),north=Math.min(85,bounds.getNorth());
+ const west=bounds.getWest(),east=bounds.getEast();
+ // 地図の表示範囲を複数の検索円で覆う。広域表示はAPI負荷対策で最大25分割。
+ const mid=(south+north)/2,lonKm=111.2*Math.max(.08,Math.cos(mid*Math.PI/180));
+ const height=(north-south)*111.2,width=(east-west)*lonKm;
+ const cols=Math.max(1,Math.min(5,Math.ceil(width/4.2)));
+ const rows=Math.max(1,Math.min(5,Math.ceil(height/4.2)));
+ const cells=[];
+ for(let y=0;y<rows;y++)for(let x=0;x<cols;x++){
+  const lat=south+(north-south)*(y+.5)/rows,lng=west+(east-west)*(x+.5)/cols;
+  const radius=Math.hypot(height/rows,width/cols)/2;
+  cells.push({lat,lng,range:radius<=.3?1:radius<=.5?2:radius<=1?3:radius<=2?4:5});
+ }
+ return {cells,limited:height>21||width>21};
 }
-document.getElementById('mapRefresh')?.addEventListener('click',refreshNearMap);
+function popupFor(shop){
+ const photo=shop.photo?`<img class="gm-popup-photo" src="${esc(shop.photo)}" alt="${esc(shop.name)}の店舗写真" loading="lazy" onerror="this.style.display='none'">`:'';
+ const link=shop.booking?`<a class="gm-popup-link" href="${esc(shop.booking)}" target="_blank" rel="noopener noreferrer">詳細を見る ›</a>`:'<span class="gm-popup-unavailable">店舗ページの登録がありません</span>';
+ return `<div class="gm-popup">${photo}<strong class="gm-popup-title">${esc(shop.name)}</strong><div class="gm-popup-genre">${esc(shop.genre||'飲食店')}</div><div class="gm-popup-address">📍 ${esc(shop.address||'住所情報なし')}</div>${link}</div>`;
+}
+async function fetchCell(cell,signal){
+ const key=[cell.lat.toFixed(3),cell.lng.toFixed(3),cell.range].join(':');
+ const cached=nearCache.get(key);
+ if(cached&&Date.now()-cached.at<180000)return cached.items;
+ const all=new Map();
+ // Hot Pepper API: 1リクエスト最大100件。複数ページ取得に対応したEdge Functionが必要。
+ for(let start=1;start<=401;start+=100){
+  const response=await fetch(API_ENDPOINT,{method:'POST',signal,headers:{'Content-Type':'application/json','apikey':PUBLIC_ANON_KEY,'Authorization':'Bearer '+PUBLIC_ANON_KEY},body:JSON.stringify({lat:cell.lat,lng:cell.lng,range:cell.range,count:100,start})});
+  const data=await response.json();
+  if(!response.ok)throw Error(data.error||'APIエラー '+response.status);
+  const batch=(data.shops||[]).map(normalize);
+  let added=0;
+  for(const s of batch){if(s.id&&!all.has(s.id)){all.set(s.id,s);added++;}}
+  if(batch.length<100||!added)break;
+ }
+ const items=[...all.values()];
+ nearCache.set(key,{at:Date.now(),items});
+ if(nearCache.size>120)nearCache.delete(nearCache.keys().next().value);
+ return items;
+}
+async function loadViewportShops(){
+ if(!nearMap)return;
+ const request=++nearRequest;
+ if(nearAbort)nearAbort.abort();
+ nearAbort=new AbortController();
+ const bounds=nearMap.getBounds(),{cells,limited}=viewportCells();
+ mapNotice('表示範囲の飲食店を検索しています…');
+ let found=new Map(),failed=0;
+ // 連続リクエストを抑えるため最大3並列。
+ let cursor=0;
+ async function worker(){while(cursor<cells.length){const cell=cells[cursor++];try{const items=await fetchCell(cell,nearAbort.signal);for(const s of items){if(s.id&&Number.isFinite(s.lat)&&Number.isFinite(s.lng)&&bounds.contains([s.lat,s.lng]))found.set(s.id,s);}}catch(e){if(e.name==='AbortError')return;failed++;}}}
+ await Promise.all(Array.from({length:Math.min(3,cells.length)},worker));
+ if(request!==nearRequest)return;
+ nearPins.clearLayers();
+ for(const shop of found.values())L.marker([shop.lat,shop.lng],{icon:restaurantPin(shop.genre),title:shop.name}).addTo(nearPins).bindPopup(popupFor(shop),{maxWidth:260,minWidth:205,autoPan:true});
+ document.getElementById('mapCount').textContent='📍 表示範囲の飲食店 '+found.size+'件';
+ if(failed)mapNotice(`一部の地域の取得に失敗しました（${failed}件）。地図を動かすか更新してください。`);
+ else if(limited)mapNotice('広い範囲を表示中です。すべての店舗を探すには地図を拡大してください。');
+ else if(!found.size)mapNotice('この範囲で取得できる飲食店はありません。');
+ else mapNotice('');
+}
+function refreshNearMap(){
+ if(!initNearMap())return;
+ if(!navigator.geolocation){mapNotice('位置情報を利用できません。地図を動かして検索できます。');scheduleViewportSearch();return;}
+ mapNotice('現在地を取得しています…');
+ navigator.geolocation.getCurrentPosition(p=>{
+  nearLocation={lat:p.coords.latitude,lng:p.coords.longitude};coords=nearLocation;
+  if(nearSelf)nearMap.removeLayer(nearSelf);
+  nearSelf=L.circleMarker([coords.lat,coords.lng],{radius:9,color:'#fff',weight:3,fillColor:'#2687ee',fillOpacity:1}).addTo(nearMap).bindPopup('📍 現在地');
+  nearMap.setView([coords.lat,coords.lng],15);
+  scheduleViewportSearch();
+ },e=>{mapNotice('現在地を取得できませんでした。地図を動かして検索できます。');scheduleViewportSearch();},{enableHighAccuracy:true,timeout:15000,maximumAge:60000});
+}
+document.getElementById('mapRefresh')?.addEventListener('click',()=>{nearCache.clear();refreshNearMap();});
 document.getElementById('nearby')?.addEventListener('click',e=>{e.stopImmediatePropagation();e.preventDefault();refreshNearMap();},true);
 window.addEventListener('load',()=>{if(initNearMap())refreshNearMap();});
 
